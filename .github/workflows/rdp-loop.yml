@@ -3,9 +3,6 @@ name: RDP Tailscale 24h Loop
 on:
   workflow_dispatch:
     inputs:
-      ts_tailnet:         { description: "Tailscale Email", required: true }
-      ts_api_key:         { description: "API Key", required: true }
-      ts_authkey:         { description: "Auth Key (Reusable)", required: true }
       runtime_minutes:    { description: "Minutes per loop (Max 355)", required: false, default: "355" }
       cycles:             { description: "Loops Remaining", required: false, default: "0" }
 
@@ -19,37 +16,33 @@ jobs:
           $dest = "$env:TEMP\tailscale-setup.exe"
           Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile $dest
           Start-Process -FilePath $dest -ArgumentList "/quiet" -Wait
-          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ github.event.inputs.ts_authkey }} --hostname="github-rdp"
+          # USES YOUR SECRET HERE:
+          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey="${{ secrets.TAILSCALE_AUTH_KEY }}" --hostname="github-rdp"
 
       - name: 2. Create User & Enable RDP
         shell: pwsh
         run: |
-          # Define User Credentials
           $u = "RDPUser"
           $p = "Dragon@12345"
-          
-          # Create the User
           $sec = ConvertTo-SecureString $p -AsPlainText -Force
           New-LocalUser -Name $u -Password $sec -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member $u
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $u
-          
-          # Enable RDP in Registry & Firewall
           Set-ItemProperty "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name fDenyTSConnections -Value 0
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-          
           Write-Host "LOGIN READY! User: $u | Pass: $p"
 
-      - name: 3. Keep Alive (Running...)
+      - name: 3. Keep Alive
         shell: pwsh
         run: |
-          Write-Host "Session is Active. Connect via Tailscale IP."
+          Write-Host "Session Active. Connect via Tailscale IP."
           Start-Sleep -Seconds (${{ github.event.inputs.runtime_minutes }} * 60)
 
       - name: 4. Trigger Next Loop
         if: always() && github.event.inputs.cycles != '0'
         shell: pwsh
         env:
+          # USES YOUR LOOP TOKEN HERE:
           GH_TOKEN: ${{ secrets.MY_LOOP_TOKEN }}
         run: |
           $next = [int]"${{ github.event.inputs.cycles }}" - 1
@@ -58,9 +51,6 @@ jobs:
             $payload = @{
               ref = "main"
               inputs = @{
-                ts_tailnet = "${{ github.event.inputs.ts_tailnet }}"
-                ts_api_key = "${{ github.event.inputs.ts_api_key }}"
-                ts_authkey = "${{ github.event.inputs.ts_authkey }}"
                 runtime_minutes = "${{ github.event.inputs.runtime_minutes }}"
                 cycles = "$next"
               }
