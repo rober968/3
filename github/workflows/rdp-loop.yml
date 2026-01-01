@@ -1,0 +1,50 @@
+name: RDP Tailscale Loop
+
+on:
+  workflow_dispatch:
+    inputs:
+      ts_tailnet:         { description: "Email", required: true }
+      ts_api_key:         { description: "API Key", required: true }
+      ts_authkey:         { description: "Auth Key", required: true }
+      runtime_minutes:    { description: "Minutes", required: false, default: "355" }
+      cycles:             { description: "Loops", required: false, default: "0" }
+
+jobs:
+  run-rdp:
+    runs-on: windows-latest
+    steps:
+      - name: Setup Tailscale
+        shell: pwsh
+        run: |
+          $dest = "$env:TEMP\tailscale-setup.exe"
+          Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile $dest
+          Start-Process -FilePath $dest -ArgumentList "/quiet" -Wait
+          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ github.event.inputs.ts_authkey }} --hostname="github-rdp"
+
+      - name: Keep Alive
+        shell: pwsh
+        run: |
+          Write-Host "RDP Active. Connecting..."
+          Start-Sleep -Seconds (${{ github.event.inputs.runtime_minutes }} * 60)
+
+      - name: Trigger Loop
+        if: always() && github.event.inputs.cycles != '0'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.MY_LOOP_TOKEN }}
+        run: |
+          $next = [int]"${{ github.event.inputs.cycles }}" - 1
+          if ($next -ge 0) {
+            $url = "https://api.github.com/repos/${{ github.repository }}/actions/workflows/rdp-loop.yml/dispatches"
+            $payload = @{
+              ref = "main"
+              inputs = @{
+                ts_tailnet = "${{ github.event.inputs.ts_tailnet }}"
+                ts_api_key = "${{ github.event.inputs.ts_api_key }}"
+                ts_authkey = "${{ github.event.inputs.ts_authkey }}"
+                runtime_minutes = "${{ github.event.inputs.runtime_minutes }}"
+                cycles = "$next"
+              }
+            } | ConvertTo-Json
+            Invoke-RestMethod -Method Post -Uri $url -Headers @{ Authorization = "Bearer $env:GH_TOKEN" } -Body $payload
+          }
