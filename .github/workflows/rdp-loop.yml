@@ -1,19 +1,19 @@
-name: RDP Tailscale Loop
+name: RDP Tailscale 24h Loop
 
 on:
   workflow_dispatch:
     inputs:
-      ts_tailnet:         { description: "Email", required: true }
+      ts_tailnet:         { description: "Tailscale Email", required: true }
       ts_api_key:         { description: "API Key", required: true }
-      ts_authkey:         { description: "Auth Key", required: true }
-      runtime_minutes:    { description: "Minutes", required: false, default: "355" }
-      cycles:             { description: "Loops", required: false, default: "0" }
+      ts_authkey:         { description: "Auth Key (Reusable)", required: true }
+      runtime_minutes:    { description: "Minutes per loop (Max 355)", required: false, default: "355" }
+      cycles:             { description: "Loops Remaining", required: false, default: "0" }
 
 jobs:
   run-rdp:
     runs-on: windows-latest
     steps:
-      - name: Setup Tailscale
+      - name: 1. Setup Tailscale
         shell: pwsh
         run: |
           $dest = "$env:TEMP\tailscale-setup.exe"
@@ -21,13 +21,32 @@ jobs:
           Start-Process -FilePath $dest -ArgumentList "/quiet" -Wait
           & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ github.event.inputs.ts_authkey }} --hostname="github-rdp"
 
-      - name: Keep Alive
+      - name: 2. Create User & Enable RDP
         shell: pwsh
         run: |
-          Write-Host "RDP Active. Connecting..."
+          # Define User Credentials
+          $u = "RDPUser"
+          $p = "Dragon@12345"
+          
+          # Create the User
+          $sec = ConvertTo-SecureString $p -AsPlainText -Force
+          New-LocalUser -Name $u -Password $sec -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member $u
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $u
+          
+          # Enable RDP in Registry & Firewall
+          Set-ItemProperty "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name fDenyTSConnections -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          
+          Write-Host "LOGIN READY! User: $u | Pass: $p"
+
+      - name: 3. Keep Alive (Running...)
+        shell: pwsh
+        run: |
+          Write-Host "Session is Active. Connect via Tailscale IP."
           Start-Sleep -Seconds (${{ github.event.inputs.runtime_minutes }} * 60)
 
-      - name: Trigger Loop
+      - name: 4. Trigger Next Loop
         if: always() && github.event.inputs.cycles != '0'
         shell: pwsh
         env:
@@ -47,4 +66,5 @@ jobs:
               }
             } | ConvertTo-Json
             Invoke-RestMethod -Method Post -Uri $url -Headers @{ Authorization = "Bearer $env:GH_TOKEN" } -Body $payload
+            Write-Host "Next loop triggered. Cycles left: $next"
           }
