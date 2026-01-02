@@ -1,4 +1,4 @@
-name: RDP Gaming Loop (DirectX Ultimate Fix)
+name: RDP Gaming Loop (Final Fix)
 
 on:
   workflow_dispatch:
@@ -10,14 +10,14 @@ jobs:
   run-rdp:
     runs-on: windows-latest
     steps:
-      - name: 1. Setup Tailscale (Connectivity)
+      - name: 1. Setup Tailscale
         run: |
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
           Invoke-WebRequest "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "ts.exe"
           Start-Process -FilePath "ts.exe" -ArgumentList "/quiet" -Wait
           & "C:\Program Files\Tailscale\tailscale.exe" up --authkey="${{ secrets.TAILSCALE_AUTH_KEY }}" --hostname="github-rdp"
 
-      - name: 2. Setup Rclone & Create User
+      - name: 2. Setup Rclone & User
         env:
           RCLONE_CONF: ${{ secrets.RCLONE_CONFIG_DATA }}
         run: |
@@ -29,44 +29,32 @@ jobs:
           Expand-Archive rclone.zip -DestinationPath C:\
           Set-Content -Path "C:\rclone.conf" -Value $env:RCLONE_CONF
 
-      - name: 3. Auto-Install DirectX (Ultimate Offline Fix)
+      - name: 3. Auto-Install DirectX (Fixed Link)
         run: |
-          # 1. Enable Cryptographic Services to trust installer files
           Set-Service -Name CryptSvc -StartupType Automatic
           Start-Service CryptSvc
-          
-          # 2. Download the full offline redistributable
-          Write-Host "Downloading DirectX Offline Package..."
-          Invoke-WebRequest -Uri "https://download.microsoft.com/download/8/4/A/84A35BF1-DAFE-49D8-8F31-27BDD4D390CC/directx_Jun2010_redist.exe" -OutFile "dx_offline.exe"
-          
-          # 3. Extract and Install silently
-          Write-Host "Extracting and Installing (This will take 2-3 mins)..."
-          mkdir C:\dxextract
-          Start-Process -FilePath ".\dx_offline.exe" -ArgumentList "/Q /T:C:\dxextract" -Wait
-          Start-Process -FilePath "C:\dxextract\DXSETUP.exe" -ArgumentList "/silent" -Wait
-          Write-Host "DirectX Installation Complete."
+          # Using the official Web Setup which is more reliable than the dead offline link
+          Invoke-WebRequest -Uri "https://download.microsoft.com/download/1/7/1/1718CCC4-6315-4D8E-9543-8E28A4E18C4C/dxwebsetup.exe" -OutFile "dxsetup.exe"
+          Start-Process -FilePath "dxsetup.exe" -ArgumentList "/Q" -Wait
 
-      - name: 4. Restore Saves from Google Drive
+      - name: 4. Restore Saves
         run: |
           $rclone = Get-ChildItem -Path "C:\rclone-v*-windows-amd64\rclone.exe" | Select-Object -First 1
           $dest = "C:\Users\RDPUser\Desktop\MASTER_SAVE_SYNC"
           if (!(Test-Path $dest)) { New-Item -ItemType Directory -Path $dest }
-          # Attempts to copy your game files from Google Drive
           & $rclone.FullName --config "C:\rclone.conf" copy "mycloud:RDP_Backups" "$dest" || cmd /c "exit /b 0"
 
-      - name: 5. Keep Alive (RDP Session)
+      - name: 5. Keep Alive
         run: Start-Sleep -Seconds (${{ github.event.inputs.runtime_minutes }} * 60)
 
-      - name: 6. Final Backup & Trigger Next Loop
+      - name: 6. Final Backup & Loop
         if: always()
         env:
           GH_TOKEN: ${{ secrets.MY_LOOP_TOKEN }}
         run: |
           $rclone = Get-ChildItem -Path "C:\rclone-v*-windows-amd64\rclone.exe" | Select-Object -First 1
           $src = "C:\Users\RDPUser\Desktop\MASTER_SAVE_SYNC"
-          # Uploads your progress back to Google Drive before closing
           & $rclone.FullName --config "C:\rclone.conf" sync "$src" "mycloud:RDP_Backups" || cmd /c "exit /b 0"
-          
           $next = [int]"${{ github.event.inputs.cycles }}" - 1
           if ($next -ge 0) {
             $url = "https://api.github.com/repos/${{ github.repository }}/actions/workflows/rdp-loop.yml/dispatches"
