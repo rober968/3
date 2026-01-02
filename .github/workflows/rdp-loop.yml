@@ -1,60 +1,58 @@
-name: RDP Tailscale 24h Loop
+name: RDP Gaming Loop (Rclone Master Sync)
 
 on:
   workflow_dispatch:
     inputs:
-      runtime_minutes:    { description: "Minutes per loop (Max 355)", required: false, default: "355" }
-      cycles:             { description: "Loops Remaining", required: false, default: "0" }
+      runtime_minutes: { description: "Minutes per loop (Max 355)", required: false, default: "355" }
+      cycles:          { description: "Loops Remaining", required: false, default: "0" }
 
 jobs:
   run-rdp:
     runs-on: windows-latest
     steps:
       - name: 1. Setup Tailscale
-        shell: pwsh
         run: |
-          $dest = "$env:TEMP\tailscale-setup.exe"
-          Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile $dest
-          Start-Process -FilePath $dest -ArgumentList "/quiet" -Wait
-          # USES YOUR SECRET HERE:
+          Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "ts.exe"
+          Start-Process -FilePath "ts.exe" -ArgumentList "/quiet" -Wait
           & "C:\Program Files\Tailscale\tailscale.exe" up --authkey="${{ secrets.TAILSCALE_AUTH_KEY }}" --hostname="github-rdp"
 
-      - name: 2. Create User & Enable RDP
-        shell: pwsh
+      - name: 2. Create User & RDP
         run: |
-          $u = "RDPUser"
-          $p = "Dragon@12345"
-          $sec = ConvertTo-SecureString $p -AsPlainText -Force
+          $u = "RDPUser"; $p = "Dragon@12345"; $sec = ConvertTo-SecureString $p -AsPlainText -Force
           New-LocalUser -Name $u -Password $sec -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member $u
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $u
           Set-ItemProperty "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name fDenyTSConnections -Value 0
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-          Write-Host "LOGIN READY! User: $u | Pass: $p"
 
-      - name: 3. Keep Alive
-        shell: pwsh
-        run: |
-          Write-Host "Session Active. Connect via Tailscale IP."
-          Start-Sleep -Seconds (${{ github.event.inputs.runtime_minutes }} * 60)
-
-      - name: 4. Trigger Next Loop
-        if: always() && github.event.inputs.cycles != '0'
-        shell: pwsh
+      - name: 3. Setup Rclone & Master Folder
         env:
-          # USES YOUR LOOP TOKEN HERE:
+          RCLONE_CONF: ${{ secrets.RCLONE_CONFIG_DATA }}
+        run: |
+          Invoke-WebRequest https://downloads.rclone.org/rclone-current-windows-amd64.zip -OutFile rclone.zip
+          Expand-Archive rclone.zip -DestinationPath C:\
+          Set-Content -Path "C:\rclone.conf" -Value $env:RCLONE_CONF
+          $desktopPath = "C:\Users\RDPUser\Desktop\MASTER_SAVE_SYNC"
+          if (!(Test-Path $desktopPath)) { New-Item -ItemType Directory -Path $desktopPath }
+
+      - name: 4. Auto-Restore from Cloud
+        run: |
+          $rclone = Get-ChildItem -Path "C:\rclone-v*-windows-amd64\rclone.exe" | Select-Object -First 1
+          $dest = "C:\Users\RDPUser\Desktop\MASTER_SAVE_SYNC"
+          & $rclone.FullName --config "C:\rclone.conf" copy "mycloud:RDP_Backups" "$dest" --create-empty-src-dirs
+
+      - name: 5. Keep Alive
+        run: Start-Sleep -Seconds (${{ github.event.inputs.runtime_minutes }} * 60)
+
+      - name: 6. Final Backup & Loop
+        if: always()
+        env:
           GH_TOKEN: ${{ secrets.MY_LOOP_TOKEN }}
         run: |
+          $rclone = Get-ChildItem -Path "C:\rclone-v*-windows-amd64\rclone.exe" | Select-Object -First 1
+          $src = "C:\Users\RDPUser\Desktop\MASTER_SAVE_SYNC"
+          & $rclone.FullName --config "C:\rclone.conf" sync "$src" "mycloud:RDP_Backups"
+          
           $next = [int]"${{ github.event.inputs.cycles }}" - 1
           if ($next -ge 0) {
-            $url = "https://api.github.com/repos/${{ github.repository }}/actions/workflows/rdp-loop.yml/dispatches"
-            $payload = @{
-              ref = "main"
-              inputs = @{
-                runtime_minutes = "${{ github.event.inputs.runtime_minutes }}"
-                cycles = "$next"
-              }
-            } | ConvertTo-Json
-            Invoke-RestMethod -Method Post -Uri $url -Headers @{ Authorization = "Bearer $env:GH_TOKEN" } -Body $payload
-            Write-Host "Next loop triggered. Cycles left: $next"
+            $url = "https://api.github.com/repos/${{ github.repository }}/actions/workflows/${{ github.workflow }}/dispatches"
+            Invoke-RestMethod -Method Post -Uri $url -Headers @{ Authorization = "Bearer $env:GH_TOKEN" } -Body (@{ref="main";inputs=@{runtime_minutes="${{ github.event.inputs.runtime_minutes }}";cycles="$next"}}|ConvertTo-Json)
           }
