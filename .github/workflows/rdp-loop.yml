@@ -45,8 +45,8 @@ jobs:
           $rclone = Get-ChildItem -Path "C:\rclone-v*-windows-amd64\rclone.exe" | Select-Object -First 1
           $dest = "C:\Users\RDPUser\Desktop\MASTER_SAVE_SYNC"
           if (!(Test-Path $dest)) { New-Item -ItemType Directory -Path $dest }
-          # Copy files from cloud to desktop
-          & $rclone.FullName --config "C:\rclone.conf" copy "mycloud:RDP_Backups" "$dest" --create-empty-src-dirs || Write-Host "No existing backups found."
+          # The '|| cmd /c "exit /b 0"' prevents the RDP from crashing if your cloud folder is empty
+          & $rclone.FullName --config "C:\rclone.conf" copy "mycloud:RDP_Backups" "$dest" --create-empty-src-dirs || cmd /c "exit /b 0"
 
       - name: 4. Keep Alive (RDP Session)
         run: Start-Sleep -Seconds (${{ github.event.inputs.runtime_minutes }} * 60)
@@ -58,8 +58,8 @@ jobs:
         run: |
           $rclone = Get-ChildItem -Path "C:\rclone-v*-windows-amd64\rclone.exe" | Select-Object -First 1
           $src = "C:\Users\RDPUser\Desktop\MASTER_SAVE_SYNC"
-          # Sync desktop folder back to Google Drive before closing
-          & $rclone.FullName --config "C:\rclone.conf" sync "$src" "mycloud:RDP_Backups"
+          # Sync desktop folder back to Google Drive
+          & $rclone.FullName --config "C:\rclone.conf" sync "$src" "mycloud:RDP_Backups" || cmd /c "exit /b 0"
           
           $next = [int]"${{ github.event.inputs.cycles }}" - 1
           if ($next -ge 0) {
