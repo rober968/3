@@ -4,55 +4,70 @@ on:
   workflow_dispatch:
     inputs:
       runtime_minutes: { description: "Minutes per loop (Max 355)", required: false, default: "355" }
-      cycles:          { description: "Loops Remaining", required: false, default: "0" }
+      cycles:          { description: "Loops Remaining (e.g., 3 for 24hrs total)", required: false, default: "0" }
 
 jobs:
   run-rdp:
     runs-on: windows-latest
     steps:
-      - name: 1. Setup Tailscale
+      - name: 1. Setup Tailscale (with Retry & TLS Fix)
         run: |
-          Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "ts.exe"
+          # Force TLS 1.2 for secure downloads
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe"
+          for ($i=1; $i -le 3; $i++) {
+            try {
+              Write-Host "Downloading Tailscale (Attempt $i)..."
+              Invoke-WebRequest -Uri $url -OutFile "ts.exe" -ErrorAction Stop
+              break
+            } catch {
+              if ($i -eq 3) { throw "Tailscale download failed after 3 attempts." }
+              Start-Sleep -Seconds 5
+            }
+          }
           Start-Process -FilePath "ts.exe" -ArgumentList "/quiet" -Wait
           & "C:\Program Files\Tailscale\tailscale.exe" up --authkey="${{ secrets.TAILSCALE_AUTH_KEY }}" --hostname="github-rdp"
 
-      - name: 2. Create User & RDP
+      - name: 2. Create RDP User
         run: |
           $u = "RDPUser"; $p = "Dragon@12345"; $sec = ConvertTo-SecureString $p -AsPlainText -Force
           New-LocalUser -Name $u -Password $sec -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member $u
           Set-ItemProperty "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name fDenyTSConnections -Value 0
 
-      - name: 3. Setup Rclone & Master Folder
+      - name: 3. Setup Rclone Config
         env:
           RCLONE_CONF: ${{ secrets.RCLONE_CONFIG_DATA }}
         run: |
           Invoke-WebRequest https://downloads.rclone.org/rclone-current-windows-amd64.zip -OutFile rclone.zip
           Expand-Archive rclone.zip -DestinationPath C:\
           Set-Content -Path "C:\rclone.conf" -Value $env:RCLONE_CONF
-          $desktopPath = "C:\Users\RDPUser\Desktop\MASTER_SAVE_SYNC"
-          if (!(Test-Path $desktopPath)) { New-Item -ItemType Directory -Path $desktopPath }
 
-      - name: 4. Auto-Restore from Cloud
+      - name: 4. Auto-Restore Saves & Create Desktop Folder
         run: |
           $rclone = Get-ChildItem -Path "C:\rclone-v*-windows-amd64\rclone.exe" | Select-Object -First 1
           $dest = "C:\Users\RDPUser\Desktop\MASTER_SAVE_SYNC"
+          if (!(Test-Path $dest)) { New-Item -ItemType Directory -Path $dest }
+          # Download existing saves from Google Drive
           & $rclone.FullName --config "C:\rclone.conf" copy "mycloud:RDP_Backups" "$dest" --create-empty-src-dirs
 
-      - name: 5. Keep Alive
+      - name: 5. Keep Alive (RDP Session)
         run: Start-Sleep -Seconds (${{ github.event.inputs.runtime_minutes }} * 60)
 
-      - name: 6. Final Backup & Loop
+      - name: 6. Final Backup & Restart Loop
         if: always()
         env:
           GH_TOKEN: ${{ secrets.MY_LOOP_TOKEN }}
         run: |
           $rclone = Get-ChildItem -Path "C:\rclone-v*-windows-amd64\rclone.exe" | Select-Object -First 1
           $src = "C:\Users\RDPUser\Desktop\MASTER_SAVE_SYNC"
+          # Sync desktop folder back to Google Drive
           & $rclone.FullName --config "C:\rclone.conf" sync "$src" "mycloud:RDP_Backups"
           
+          # Check if more cycles are needed
           $next = [int]"${{ github.event.inputs.cycles }}" - 1
           if ($next -ge 0) {
             $url = "https://api.github.com/repos/${{ github.repository }}/actions/workflows/${{ github.workflow }}/dispatches"
-            Invoke-RestMethod -Method Post -Uri $url -Headers @{ Authorization = "Bearer $env:GH_TOKEN" } -Body (@{ref="main";inputs=@{runtime_minutes="${{ github.event.inputs.runtime_minutes }}";cycles="$next"}}|ConvertTo-Json)
+            $body = @{ref="main";inputs=@{runtime_minutes="${{ github.event.inputs.runtime_minutes }}";cycles="$next"}} | ConvertTo-Json
+            Invoke-RestMethod -Method Post -Uri $url -Headers @{ Authorization = "Bearer $env:GH_TOKEN" } -Body $body
           }
