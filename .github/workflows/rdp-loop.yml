@@ -1,34 +1,23 @@
-name: RDP Gaming Loop (Rclone Master Sync)
+name: RDP Gaming Loop (DirectX Auto-Fix)
 
 on:
   workflow_dispatch:
     inputs:
       runtime_minutes: { description: "Minutes per loop (Max 355)", required: false, default: "355" }
-      cycles:          { description: "Loops Remaining (e.g., 3 for 24hrs total)", required: false, default: "0" }
+      cycles:          { description: "Loops Remaining", required: false, default: "0" }
 
 jobs:
   run-rdp:
     runs-on: windows-latest
     steps:
-      - name: 1. Setup Tailscale (TLS & Retry Fix)
+      - name: 1. Setup Tailscale
         run: |
-          # Force TLS 1.2 to prevent download errors
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe"
-          for ($i=1; $i -le 3; $i++) {
-            try {
-              Write-Host "Downloading Tailscale (Attempt $i)..."
-              Invoke-WebRequest -Uri $url -OutFile "ts.exe" -ErrorAction Stop
-              break
-            } catch {
-              if ($i -eq 3) { throw "Tailscale download failed." }
-              Start-Sleep -Seconds 5
-            }
-          }
+          Invoke-WebRequest "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "ts.exe"
           Start-Process -FilePath "ts.exe" -ArgumentList "/quiet" -Wait
           & "C:\Program Files\Tailscale\tailscale.exe" up --authkey="${{ secrets.TAILSCALE_AUTH_KEY }}" --hostname="github-rdp"
 
-      - name: 2. Setup Rclone & Create RDP User
+      - name: 2. Setup Rclone & User
         env:
           RCLONE_CONF: ${{ secrets.RCLONE_CONFIG_DATA }}
         run: |
@@ -40,27 +29,33 @@ jobs:
           Expand-Archive rclone.zip -DestinationPath C:\
           Set-Content -Path "C:\rclone.conf" -Value $env:RCLONE_CONF
 
-      - name: 3. Restore Saves from Google Drive
+      - name: 3. Auto-Install DirectX (Fix Cabinet Error)
+        run: |
+          # This fixes the "Cabinet file cannot be trusted" error automatically
+          Set-Service -Name CryptSvc -StartupType Automatic
+          Start-Service CryptSvc
+          Write-Host "Installing DirectX Components..."
+          Invoke-WebRequest -Uri "https://download.microsoft.com/download/1/7/1/1718CCC4-6315-4D8E-9543-8E28A4E18C4C/dxwebsetup.exe" -OutFile "dxsetup.exe"
+          Start-Process -FilePath "dxsetup.exe" -ArgumentList "/Q" -Wait
+
+      - name: 4. Restore Saves
         run: |
           $rclone = Get-ChildItem -Path "C:\rclone-v*-windows-amd64\rclone.exe" | Select-Object -First 1
           $dest = "C:\Users\RDPUser\Desktop\MASTER_SAVE_SYNC"
           if (!(Test-Path $dest)) { New-Item -ItemType Directory -Path $dest }
-          # The '|| cmd /c "exit /b 0"' prevents the RDP from crashing if your cloud folder is empty
-          & $rclone.FullName --config "C:\rclone.conf" copy "mycloud:RDP_Backups" "$dest" --create-empty-src-dirs || cmd /c "exit /b 0"
+          & $rclone.FullName --config "C:\rclone.conf" copy "mycloud:RDP_Backups" "$dest" || cmd /c "exit /b 0"
 
-      - name: 4. Keep Alive (RDP Session)
+      - name: 5. Keep Alive
         run: Start-Sleep -Seconds (${{ github.event.inputs.runtime_minutes }} * 60)
 
-      - name: 5. Final Backup & Trigger Next Loop
+      - name: 6. Final Backup & Loop
         if: always()
         env:
           GH_TOKEN: ${{ secrets.MY_LOOP_TOKEN }}
         run: |
           $rclone = Get-ChildItem -Path "C:\rclone-v*-windows-amd64\rclone.exe" | Select-Object -First 1
           $src = "C:\Users\RDPUser\Desktop\MASTER_SAVE_SYNC"
-          # Sync desktop folder back to Google Drive
           & $rclone.FullName --config "C:\rclone.conf" sync "$src" "mycloud:RDP_Backups" || cmd /c "exit /b 0"
-          
           $next = [int]"${{ github.event.inputs.cycles }}" - 1
           if ($next -ge 0) {
             $url = "https://api.github.com/repos/${{ github.repository }}/actions/workflows/rdp-loop.yml/dispatches"
