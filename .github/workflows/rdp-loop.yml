@@ -1,57 +1,85 @@
-name: Ultimate-Gaming-RDP-ManualDownload
-on: 
+name: RDP Gaming Master Loop
+
+on:
   workflow_dispatch:
+    inputs:
+      runtime_minutes: { description: "Minutes per loop (Max 355)", required: false, default: "355" }
+      cycles:          { description: "Loops Remaining (Auto-Restarts)", required: false, default: "5" }
 
 jobs:
-  build:
+  run-rdp:
     runs-on: windows-latest
     steps:
       - name: 1. Maximize Disk Space
         shell: powershell
         run: |
+          Write-Host "Reclaiming 20GB+ for games..." -ForegroundColor Cyan
           Remove-Item -Path "C:\Microsoft\AndroidSDK" -Recurse -Force -ErrorAction SilentlyContinue
           Remove-Item -Path "C:\Program Files\dotnet" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "C:\Program Files (x86)\Microsoft SDKs" -Recurse -Force -ErrorAction SilentlyContinue
 
-      - name: 2. Network Setup (Tailscale)
-        shell: powershell
+      - name: 2. Setup Tailscale
         run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
-          Invoke-WebRequest -Uri $tsUrl -OutFile "ts.msi"
-          Start-Process msiexec.exe -ArgumentList "/i", "ts.msi", "/quiet", "/norestart" -Wait
-          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-gaming-pc
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+          Invoke-WebRequest "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "ts.exe"
+          Start-Process -FilePath "ts.exe" -ArgumentList "/quiet" -Wait
+          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey="${{ secrets.TAILSCALE_AUTH_KEY }}" --hostname="github-gaming-rdp"
 
-      - name: 3. Install System Runtimes
-        shell: powershell
+      - name: 3. Setup Rclone & User (RDPUser)
+        env:
+          RCLONE_CONF: ${{ secrets.RCLONE_CONFIG_DATA }}
         run: |
-          $vcredist_url = "https://github.com/abbodi1406/vcredist/releases/download/v0.82.0/VisualCppRedist_AIO_x86_x64.exe"
-          Invoke-WebRequest -Uri $vcredist_url -OutFile "vcredist.exe"
-          Start-Process -FilePath ".\vcredist.exe" -ArgumentList "/ai /gm2" -Wait
-          $dx_url = "https://download.microsoft.com/download/1/7/1/1718CCC4-6315-4D8E-9543-8E28A4E18C4C/dxwebsetup.exe"
-          Invoke-WebRequest -Uri $dx_url -OutFile "dxwebsetup.exe"
-          Start-Process -FilePath ".\dxwebsetup.exe" -ArgumentList "/q" -Wait
+          # User Setup
+          $u = "RDPUser"; $p = "Dragon@12345"; $sec = ConvertTo-SecureString $p -AsPlainText -Force
+          New-LocalUser -Name $u -Password $sec -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member $u
+          Set-ItemProperty "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name fDenyTSConnections -Value 0
+          
+          # Rclone Setup
+          Invoke-WebRequest https://downloads.rclone.org/rclone-current-windows-amd64.zip -OutFile rclone.zip
+          Expand-Archive rclone.zip -DestinationPath C:\
+          Set-Content -Path "C:\rclone.conf" -Value $env:RCLONE_CONF
 
-      - name: 4. Prepare Software GPU (Mesa3D)
-        shell: powershell
+      - name: 4. Forced DirectX & GPU Fix (Mesa3D)
         run: |
+          # Enable Services for DirectX
+          Set-Service -Name CryptSvc -StartupType Automatic; Start-Service CryptSvc
+          
+          # Forced DirectX Installation
+          Invoke-WebRequest -Uri "https://download.microsoft.com/download/8/4/A/84A35BF1-DAFE-49D8-8F31-27BDD4D390CC/directx_Jun2010_redist.exe" -OutFile "dx_full.exe"
+          mkdir C:\dxtemp
+          Start-Process -FilePath ".\dx_full.exe" -ArgumentList "/Q /T:C:\dxtemp" -Wait
+          Start-Process -FilePath "C:\dxtemp\DXSETUP.exe" -ArgumentList "/silent" -Wait
+          
+          # Prepare Software GPU (Mesa3D) for Ben 10 / GTA
           Invoke-WebRequest -Uri "https://github.com/pal1000/mesa-dist-win/releases/download/24.0.2/mesa3d-24.0.2-release-msvc.7z" -OutFile "mesa.7z"
           & "C:\Program Files\7-Zip\7z.exe" e mesa.7z x64/opengl32.dll x64/d3d11.dll x64/dxgi.dll -y
-          $gameFolderPath = [System.IO.Path]::Combine($env:USERPROFILE, "Desktop\Put_Game_Here")
-          New-Item -ItemType Directory -Path $gameFolderPath -Force
-          Copy-Item "opengl32.dll", "d3d11.dll", "dxgi.dll" -Destination $gameFolderPath -Force
+          $putGameHere = "C:\Users\RDPUser\Desktop\Put_Game_Here"
+          New-Item -ItemType Directory -Path $putGameHere -Force
+          Copy-Item "opengl32.dll", "d3d11.dll", "dxgi.dll" -Destination $putGameHere -Force
 
-      - name: 5. Start RDP Server (RDPUser Restored)
-        shell: powershell
+      - name: 5. Restore Saves from Cloud
         run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          $rclone = Get-ChildItem -Path "C:\rclone-v*-windows-amd64\rclone.exe" | Select-Object -First 1
+          $dest = "C:\Users\RDPUser\Desktop\MASTER_SAVE_SYNC"
+          if (!(Test-Path $dest)) { New-Item -ItemType Directory -Path $dest }
+          & $rclone.FullName --config "C:\rclone.conf" copy "mycloud:RDP_Backups" "$dest" || cmd /c "exit /b 0"
+
+      - name: 6. Keep Alive (Gaming Session)
+        run: Start-Sleep -Seconds (${{ github.event.inputs.runtime_minutes }} * 60)
+
+      - name: 7. Final Backup & Trigger Next Loop
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.MY_LOOP_TOKEN }}
+        run: |
+          $rclone = Get-ChildItem -Path "C:\rclone-v*-windows-amd64\rclone.exe" | Select-Object -First 1
+          $src = "C:\Users\RDPUser\Desktop\MASTER_SAVE_SYNC"
+          & $rclone.FullName --config "C:\rclone.conf" sync "$src" "mycloud:RDP_Backups" || cmd /c "exit /b 0"
           
-          # This matches your previous setup
-          $password = ConvertTo-SecureString "GamingPC123!" -AsPlainText -Force
-          New-LocalUser -Name "RDPUser" -Password $password -AccountNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member "RDPUser"
-          
-          $tsIP = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
-          Write-Host "==========================================" -ForegroundColor Green
-          Write-Host "USER: RDPUser | PASS: GamingPC123!" -ForegroundColor Yellow
-          Write-Host "==========================================" -ForegroundColor Green
-          while($true) { Start-Sleep -Seconds 300 }
+          $next = [int]"${{ github.event.inputs.cycles }}" - 1
+          if ($next -ge 0) {
+            $url = "https://api.github.com/repos/${{ github.repository }}/actions/workflows/${{ github.workflow }}/dispatches"
+            $body = @{ref="${{ github.ref_name }}";inputs=@{runtime_minutes="${{ github.event.inputs.runtime_minutes }}";cycles="$next"}} | ConvertTo-Json
+            Invoke-RestMethod -Method Post -Uri $url -Headers @{ Authorization = "Bearer $env:GH_TOKEN" } -Body $body
+          }
